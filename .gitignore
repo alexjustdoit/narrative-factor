@@ -5,4 +5,8 @@ __pycache__/
 venv/
 data/trends/
 data/signals/
-db.sqlite
+data/universe/cik_map.json
+data/filings.db
+data/scores.db
+*.db
+*.parquet
