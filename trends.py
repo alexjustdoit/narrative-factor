@@ -99,12 +99,18 @@ def fetch_narrative(narrative: dict, force: bool = False) -> pd.DataFrame:
             chunk = _fetch_chunk(pytrends, terms, start_str, end_str)
             if not chunk.empty:
                 chunks.append(chunk)
-                print(f"    chunk {start_str}–{end_str}: {len(chunk)} weeks")
+                print(f"    chunk {start_str}–{end_str}: {len(chunk)} rows")
         except Exception as e:
             print(f"  Warning: chunk {start_str}–{end_str} failed: {e}")
         time.sleep(CHUNK_DELAY)
 
     series = _stitch_chunks(chunks)
+
+    # Resample to weekly (Monday) regardless of input granularity.
+    # Google Trends returns daily data for sub-9-month windows, weekly for longer.
+    # Standardising here keeps activation.py parameters consistent.
+    series.index = pd.to_datetime(series.index)
+    series = series.resample("W-MON").max().dropna()
 
     # Rescale so the all-time max = 100
     if series.max() > 0:
