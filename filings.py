@@ -16,7 +16,7 @@ import os
 import re
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 
 import warnings
 import pandas as pd
@@ -153,7 +153,7 @@ def fetch_and_store(ticker: str, conn: sqlite3.Connection, n_filings: int = 3):
                 acc,
                 item1 or None,
                 item7 or None,
-                datetime.utcnow().isoformat(),
+                datetime.now(UTC).isoformat(),
             ))
             conn.commit()
             time.sleep(FETCH_DELAY)
