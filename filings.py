@@ -169,10 +169,11 @@ def fetch_and_store(ticker: str, conn: sqlite3.Connection, n_filings: int = 3):
 def get_context(ticker: str, as_of_date: str, conn: sqlite3.Connection) -> dict | None:
     """
     Returns the most recent filing context available before as_of_date.
-    Returns dict with item1_text, item7_text, filed_date — or None if not found.
+    Returns dict with item1_text, item7_text, filed_date, accession_number
+    — or None if not found.
     """
     row = conn.execute("""
-        SELECT item1_text, item7_text, filed_date
+        SELECT item1_text, item7_text, filed_date, accession_number
         FROM filings
         WHERE ticker = ? AND filed_date <= ?
         ORDER BY filed_date DESC
@@ -182,9 +183,10 @@ def get_context(ticker: str, as_of_date: str, conn: sqlite3.Connection) -> dict 
     if not row:
         return None
     return {
-        "item1_text": row[0] or "",
-        "item7_text": row[1] or "",
-        "filed_date": row[2],
+        "item1_text":       row[0] or "",
+        "item7_text":       row[1] or "",
+        "filed_date":       row[2],
+        "accession_number": row[3],
     }
 
 
