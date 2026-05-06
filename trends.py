@@ -10,28 +10,46 @@ Output: data/trends/<narrative_id>.csv  with columns [date, score]
 
 import time
 import os
+import random
 import pandas as pd
 from pytrends.request import TrendReq
+from pytrends.exceptions import TooManyRequestsError
 from narratives import NARRATIVES
 
 TRENDS_DIR = "data/trends"
-# Full backtest window from the paper
 START_DATE = "2020-01-01"
+
+# Delay between chunks within a narrative (seconds)
+CHUNK_DELAY = 10
+# Delay between narratives (seconds)
+NARRATIVE_DELAY = 15
+# Exponential backoff on 429: base * 2^attempt, plus jitter
+BACKOFF_BASE = 30
+MAX_RETRIES = 4
 
 
 def _fetch_chunk(pytrends: TrendReq, terms: list[str], start: str, end: str) -> pd.Series:
-    """Fetch a single time chunk for a list of terms, returning max across terms."""
-    pytrends.build_payload(
-        kw_list=terms[:5],  # Trends API limit is 5 terms per request
-        timeframe=f"{start} {end}",
-        geo="US",
-    )
-    df = pytrends.interest_over_time()
-    if df.empty:
-        return pd.Series(dtype=float)
-    df = df.drop(columns=["isPartial"], errors="ignore")
-    # Take the max score across all terms on each date
-    return df.max(axis=1)
+    """Fetch a single time chunk with exponential backoff on 429."""
+    for attempt in range(MAX_RETRIES):
+        try:
+            pytrends.build_payload(
+                kw_list=terms[:5],
+                timeframe=f"{start} {end}",
+                geo="US",
+            )
+            df = pytrends.interest_over_time()
+            if df.empty:
+                return pd.Series(dtype=float)
+            df = df.drop(columns=["isPartial"], errors="ignore")
+            return df.max(axis=1)
+        except TooManyRequestsError:
+            if attempt == MAX_RETRIES - 1:
+                raise
+            wait = BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 5)
+            print(f"    429 rate limit — waiting {wait:.0f}s before retry {attempt + 1}/{MAX_RETRIES - 1}")
+            time.sleep(wait)
+        except Exception:
+            raise
 
 
 def _stitch_chunks(chunks: list[pd.Series]) -> pd.Series:
@@ -81,9 +99,10 @@ def fetch_narrative(narrative: dict, force: bool = False) -> pd.DataFrame:
             chunk = _fetch_chunk(pytrends, terms, start_str, end_str)
             if not chunk.empty:
                 chunks.append(chunk)
+                print(f"    chunk {start_str}–{end_str}: {len(chunk)} weeks")
         except Exception as e:
             print(f"  Warning: chunk {start_str}–{end_str} failed: {e}")
-        time.sleep(1)  # avoid rate limiting
+        time.sleep(CHUNK_DELAY)
 
     series = _stitch_chunks(chunks)
 
@@ -101,10 +120,12 @@ def fetch_narrative(narrative: dict, force: bool = False) -> pd.DataFrame:
 
 def fetch_all(force: bool = False):
     """Fetch Trends data for all 14 narratives."""
-    for narrative in NARRATIVES:
-        print(f"Fetching: {narrative['label']}")
+    for i, narrative in enumerate(NARRATIVES):
+        print(f"\n[{i+1}/14] Fetching: {narrative['label']}")
         fetch_narrative(narrative, force=force)
-        time.sleep(2)
+        if i < len(NARRATIVES) - 1:
+            print(f"  Waiting {NARRATIVE_DELAY}s before next narrative...")
+            time.sleep(NARRATIVE_DELAY)
 
 
 if __name__ == "__main__":
