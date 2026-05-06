@@ -6,6 +6,27 @@ The factor achieved a **1.95x information ratio** (factor-neutralized, industry-
 
 ---
 
+## Important differences from the paper (retail implementation)
+
+The paper's results are based on an institutional long-short strategy with daily rebalancing. This implementation differs in three meaningful ways:
+
+**Long-only instead of long-short**
+The paper constructs a market-neutral portfolio — buying high-exposure stocks and shorting low-exposure stocks. This implementation is long-only, holding only the top-decile narrative exposure stocks within each sector. Long-only captures the upside of the signal but retains full market beta: in a broad market drawdown, the portfolio falls with the market rather than being insulated by the short book. Expect higher volatility and deeper drawdowns than the paper reports, and performance that is more correlated with the S&P 500.
+
+**Weekly rebalancing instead of daily**
+The paper rebalances daily with a 3% turnover cap. This implementation rebalances weekly. Since the narrative signal is forward-looking and moves on a multi-week timescale, weekly rebalancing should capture most of the signal value while meaningfully reducing transaction costs and tax events. Turnover will be lower than the paper's ~7x annual figure.
+
+**Tax considerations: account type matters significantly**
+
+| Account type | Impact |
+|---|---|
+| **Tax-advantaged (IRA, 401k, Roth)** | Gains compound tax-free or tax-deferred. This is the natural home for an active factor strategy — turnover has no immediate tax consequence. |
+| **Taxable account** | Each rebalance that sells a position generates a taxable event. With weekly rebalancing, most positions are held for weeks to a few months, meaning gains are taxed as **short-term capital gains** (ordinary income rates: up to 37%). This can substantially erode the strategy's excess return. A strategy generating 6-7% annual excess return in a 35% bracket could see that advantage reduced by 2-3 percentage points annually from tax drag alone, before even accounting for state taxes. |
+
+**Practical guidance:** Run this strategy in a tax-advantaged account if possible. In a taxable account, consider extending the rebalance frequency to monthly or quarterly to allow more positions to qualify for long-term capital gains treatment (held > 1 year), at the cost of some signal freshness.
+
+---
+
 ## How it works
 
 1. **Narrative tracking** — 14 macro narratives (AI, inflation, tariffs, geopolitical conflicts, etc.) are monitored via Google Trends. A two-stage activation filter identifies narratives at peak public attention.
