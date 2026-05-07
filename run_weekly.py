@@ -27,6 +27,7 @@ from datetime import date, timedelta
 import pandas as pd
 
 import trends as trends_mod
+import wiki as wiki_mod
 import activation as activation_mod
 import edgar
 import filings as filing_store
@@ -43,7 +44,8 @@ def step(n: int, label: str):
     print(f"{'='*60}")
 
 
-def run_weekly(backfill: bool = False, skip_trends: bool = False):
+def run_weekly(backfill: bool = False, skip_trends: bool = False,
+               skip_wikipedia: bool = False):
     today = date.today().isoformat()
     week_ago = (date.today() - timedelta(days=8)).isoformat()
 
@@ -56,7 +58,15 @@ def run_weekly(backfill: bool = False, skip_trends: bool = False):
         trends_mod.fetch_all(force=False)  # skips already-cached narratives
 
     # ------------------------------------------------------------------
-    step(2, "Recompute activation signals")
+    step(2, "Refresh Wikipedia pageviews")
+    # ------------------------------------------------------------------
+    if skip_wikipedia:
+        print("  Skipped (--skip-wikipedia)")
+    else:
+        wiki_mod.fetch_all(force=False)  # skips narratives cached within 14 days
+
+    # ------------------------------------------------------------------
+    step(3, "Recompute activation signals")
     # ------------------------------------------------------------------
     results = activation_mod.compute_all()
     active_today = active_narratives_on(today)
@@ -64,7 +74,7 @@ def run_weekly(backfill: bool = False, skip_trends: bool = False):
     print(f"\nCurrently active ({len(active_today)}): {active_labels}")
 
     # ------------------------------------------------------------------
-    step(3, "Fetch new 10-K filings")
+    step(4, "Fetch new 10-K filings")
     # ------------------------------------------------------------------
     tickers = get_tickers()
     filings_conn = filing_store.get_db()
@@ -98,7 +108,7 @@ def run_weekly(backfill: bool = False, skip_trends: bool = False):
     print(f"\nNew filings fetched: {new_filings}")
 
     # ------------------------------------------------------------------
-    step(4, "Score new filings against active narratives")
+    step(5, "Score new filings against active narratives")
     # ------------------------------------------------------------------
     if not active_today and not backfill:
         print("No active narratives — skipping scoring.")
@@ -127,7 +137,7 @@ def run_weekly(backfill: bool = False, skip_trends: bool = False):
         filings_conn.close()
 
     # ------------------------------------------------------------------
-    step(5, "Rebuild composite factor scores")
+    step(6, "Rebuild composite factor scores")
     # ------------------------------------------------------------------
     df = composite_mod.build_and_save()
 
@@ -320,5 +330,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Skip Google Trends refresh (useful when re-running backfill in the same session)",
     )
+    parser.add_argument(
+        "--skip-wikipedia",
+        action="store_true",
+        help="Skip Wikipedia pageview refresh (useful when re-running in the same session)",
+    )
     args = parser.parse_args()
-    run_weekly(backfill=args.backfill, skip_trends=args.skip_trends)
+    run_weekly(
+        backfill=args.backfill,
+        skip_trends=args.skip_trends,
+        skip_wikipedia=args.skip_wikipedia,
+    )

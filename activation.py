@@ -10,25 +10,68 @@ Stage 2 — Proximity to trailing high:
   - Isolates narratives at or near peak attention; filters out fading ones
 
 Output: data/signals/<narrative_id>.csv  with columns [date, score, active]
+
+Wikipedia blending (optional):
+  Set USE_WIKIPEDIA=true in .env to blend Google Trends scores with Wikipedia
+  pageview scores before applying the activation filter. The blend weight is
+  controlled by WIKI_BLEND_WEIGHT (default 0.4 = 40% Wikipedia, 60% Trends).
+  Blending reduces false activations driven by search curiosity without
+  corresponding real-world engagement (Wikipedia visits).
 """
 
 import os
 import pandas as pd
 import numpy as np
+from dotenv import load_dotenv
 from narratives import NARRATIVES
 
+load_dotenv()
+
+USE_WIKIPEDIA    = os.getenv("USE_WIKIPEDIA", "false").lower() == "true"
+WIKI_BLEND_WEIGHT = float(os.getenv("WIKI_BLEND_WEIGHT", "0.4"))
+
 SIGNALS_DIR = "data/signals"
-TRENDS_DIR = "data/trends"
+TRENDS_DIR  = "data/trends"
 
-MIN_SCORE = 10          # minimum absolute popularity floor
-GROWTH_THRESHOLD = 1.0  # 100% growth = doubled
-LOOKBACK_3M = 13        # ~3 months in weekly data
-LOOKBACK_3Y = 156       # ~3 years in weekly data
-ROLLING_HIGH_DAYS = 26  # 180 days ≈ 26 weeks
-PROXIMITY_PCT = 0.80    # must be within 80% of rolling high
+MIN_SCORE        = 10    # minimum absolute popularity floor
+GROWTH_THRESHOLD = 1.0   # 100% growth = doubled
+LOOKBACK_3M      = 13    # ~3 months in weekly data
+LOOKBACK_3Y      = 156   # ~3 years in weekly data
+ROLLING_HIGH_DAYS = 26   # 180 days ≈ 26 weeks
+PROXIMITY_PCT    = 0.80  # must be within 80% of rolling high
 
 
-def compute_activation(narrative_id: str) -> pd.DataFrame:
+def _blend_wikipedia(df: pd.DataFrame, narrative_id: str) -> pd.DataFrame:
+    """
+    Blend Google Trends scores with Wikipedia pageview scores.
+
+    Wiki scores are interpolated to match Trends dates; rows where wiki data
+    is missing (article didn't exist yet, or before our history start) keep
+    the original Trends score unchanged.
+
+    Returns a new DataFrame with the blended 'score' column.
+    """
+    import wiki as wiki_mod
+    wiki_series = wiki_mod.get_score_series(narrative_id)
+    if wiki_series is None or wiki_series.empty:
+        return df
+
+    # Use date as index so both series align on Timestamps
+    result = df.copy().set_index("date")
+    wiki_aligned = (
+        wiki_series
+        .reindex(result.index)
+        .interpolate(method="time", limit_direction="forward")
+    )
+    has_wiki = wiki_aligned.notna()
+    result.loc[has_wiki, "score"] = (
+        (1 - WIKI_BLEND_WEIGHT) * result.loc[has_wiki, "score"]
+        + WIKI_BLEND_WEIGHT     * wiki_aligned[has_wiki]
+    ).clip(0, 100).round(2)
+    return result.reset_index()
+
+
+def compute_activation(narrative_id: str, use_wikipedia: bool = False) -> pd.DataFrame:
     """
     Load raw Trends scores for a narrative and apply the two-stage filter.
     Returns a DataFrame with columns [date, score, active].
@@ -38,6 +81,10 @@ def compute_activation(narrative_id: str) -> pd.DataFrame:
         raise FileNotFoundError(f"No trends data for {narrative_id}. Run trends.py first.")
 
     df = pd.read_csv(trends_path, parse_dates=["date"]).sort_values("date").reset_index(drop=True)
+
+    if use_wikipedia:
+        df = _blend_wikipedia(df, narrative_id)
+
     scores = df["score"]
 
     # --- Stage 1: minimum score ---
@@ -75,14 +122,16 @@ def compute_activation(narrative_id: str) -> pd.DataFrame:
     return df[["date", "score", "active"]]
 
 
-def compute_all() -> dict[str, pd.DataFrame]:
+def compute_all(use_wikipedia: bool = USE_WIKIPEDIA) -> dict[str, pd.DataFrame]:
     """Compute activation signals for all narratives and save to CSV."""
     os.makedirs(SIGNALS_DIR, exist_ok=True)
+    if use_wikipedia:
+        print("  (Wikipedia blending enabled — WIKI_BLEND_WEIGHT={:.0%})".format(WIKI_BLEND_WEIGHT))
     results = {}
     for narrative in NARRATIVES:
         nid = narrative["id"]
         try:
-            df = compute_activation(nid)
+            df = compute_activation(nid, use_wikipedia=use_wikipedia)
             out_path = os.path.join(SIGNALS_DIR, f"{nid}.csv")
             df.to_csv(out_path, index=False)
             active_weeks = df["active"].sum()
@@ -113,7 +162,13 @@ def active_narratives_on(date: str) -> list[str]:
 
 
 if __name__ == "__main__":
-    results = compute_all()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--use-wikipedia", action="store_true",
+                        help="Blend Google Trends with Wikipedia pageview scores")
+    args = parser.parse_args()
+
+    results = compute_all(use_wikipedia=args.use_wikipedia or USE_WIKIPEDIA)
 
     # Sanity check: print what was active at key dates
     check_dates = {

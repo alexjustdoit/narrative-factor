@@ -125,9 +125,10 @@ def fetch_narrative(narrative: dict, force: bool = False) -> pd.DataFrame:
 
 
 def fetch_all(force: bool = False):
-    """Fetch Trends data for all 14 narratives."""
+    """Fetch Trends data for all narratives."""
+    n_total = len(NARRATIVES)
     for i, narrative in enumerate(NARRATIVES):
-        print(f"\n[{i+1}/14] Fetching: {narrative['label']}")
+        print(f"\n[{i+1}/{n_total}] Fetching: {narrative['label']}")
         fetch_narrative(narrative, force=force)
         if i < len(NARRATIVES) - 1:
             print(f"  Waiting {NARRATIVE_DELAY}s before next narrative...")

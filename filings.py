@@ -233,13 +233,16 @@ if __name__ == "__main__":
     tickers = get_tickers()
     conn = get_db()
 
-    print(f"Fetching 10-K and 10-Q filings for {len(tickers)} tickers...")
-    print("This will take ~60-90 minutes. Already-cached filings are skipped.\n")
+    print(f"Fetching 10-K filings for {len(tickers)} tickers...")
+    print("10-K: 7 per ticker (~FY2018–FY2024, covers 2020–2026 backtest)")
+    print("Phase 2 (10-Qs) is commented out — run after validating 10-K backtest.")
+    print("This will take ~90 min. Already-cached filings are skipped.\n")
 
     for i, ticker in enumerate(tickers):
         print(f"[{i+1}/{len(tickers)}] {ticker}")
-        fetch_and_store(ticker, conn, n_filings=3, form_type="10-K")
-        fetch_and_store(ticker, conn, n_filings=4, form_type="10-Q")
+        fetch_and_store(ticker, conn, n_filings=7, form_type="10-K")   # covers FY2018–FY2024 (2020–2026 backtest)
+        # Phase 2 — uncomment after validating 10-K-only backtest:
+        # fetch_and_store(ticker, conn, n_filings=12, form_type="10-Q")
 
     total = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
     print(f"\nDone. {total} filings stored in {DB_PATH}")
