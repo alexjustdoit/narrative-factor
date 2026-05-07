@@ -27,6 +27,40 @@ The paper rebalances daily with a 3% turnover cap. This implementation rebalance
 
 ---
 
+## Strategy design
+
+The narrative factor is designed as an **overlay on an established factor-based portfolio** rather than a standalone strategy. By itself, the signal identifies macro narrative tailwinds but does not screen for fundamental quality. Combined with a base factor, narrative provides the "right time" dimension while the base factor provides the "right company" filter.
+
+### Three overlay modes to validate
+
+**Selection layer** — Restrict the base factor's universe to stocks in the top narrative quartile or decile. Clean and interpretable; the base factor picks the stocks, narrative filters for macro timing. Reduces diversification but maximizes signal purity. This is closest to the original paper's methodology (top-decile within sector).
+
+**Position weighting layer** — Keep the base factor's full universe; use the narrative score to tilt position sizes up or down. Overweight high-exposure stocks, underweight low-exposure stocks. More continuous expression of the signal, preserves diversification, and allows tuning the blend ratio between base factor and narrative. The most practically flexible approach.
+
+**Timing layer** — Use the aggregate portfolio-level (or sector-level) narrative score to modulate overall market exposure, or to rotate between base factors depending on the narrative environment (e.g., lean growth when AI/tech narratives dominate, lean value when recession/rates narratives dominate). Highest potential alpha; also the highest risk of overfitting. Test this last — market timing is hard to validate on a 6-year window with an unusual macro regime.
+
+These modes are not mutually exclusive. The backtest grid tests combinations.
+
+### Base strategies to test on
+
+| Base strategy | Fit with narrative | Key consideration |
+|---|---|---|
+| **Quality** (ROIC, low leverage, stable earnings) | Strong | Natural complement — quality filters for company health, narrative filters for macro tailwind. Signals are largely orthogonal; genuine information diversification. |
+| **Momentum** (12-1 month price return) | Most theoretically interesting | Narratives are a plausible leading indicator for price momentum — public discourse precedes buying behavior. Could improve entry timing and reduce crowded-trade exposure. |
+| **Growth** (revenue growth, margin expansion) | Correlation risk | Growth stocks cluster in AI, clean energy, etc., which are already high-narrative sectors. Risk of double-counting the same signal rather than diversifying it. |
+| **Value** (P/E, P/B, EV/EBITDA) | Interesting tension | Value stocks are often cheap *because* narratives are against them — that's the contrarian thesis. A selection-layer overlay may screen out exactly the stocks value wants. A weighting-layer approach (narrative tilts sizes within the value universe) is more compatible. |
+
+**Recommended test order:** quality-weighting → momentum-selection → growth-weighting → value-weighting → timing experiments.
+
+### Walk-forward validation plan
+
+- Train 2020–2022, test 2022–2024
+- Train 2020–2024, test 2024–2026
+
+Avoid fitting to the full 2020–2026 period in a single pass — the macro regime (pandemic, zero rates, rate shock, AI boom) is unusual and a single in-sample fit will overstate confidence.
+
+---
+
 ## How it works
 
 1. **Narrative tracking** — 28 macro narratives (AI, inflation, tariffs, geopolitical conflicts, Shiller perennial themes, etc.) are monitored via Google Trends and Wikipedia pageviews. A two-stage activation filter identifies narratives at peak public attention; typically 5–15 are active at any given time.
