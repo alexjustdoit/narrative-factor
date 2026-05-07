@@ -54,10 +54,26 @@ These modes are not mutually exclusive. The backtest grid tests combinations.
 
 ### Walk-forward validation plan
 
+**Primary window (full 28-narrative set):**
 - Train 2020–2022, test 2022–2024
 - Train 2020–2024, test 2024–2026
 
 Avoid fitting to the full 2020–2026 period in a single pass — the macro regime (pandemic, zero rates, rate shock, AI boom) is unusual and a single in-sample fit will overstate confidence.
+
+**Extended window (robustness check):**
+
+The narrative data sources impose hard limits on how far back the signal can be constructed:
+
+| Period | Trends | Wikipedia | Active narratives | Usefulness |
+|---|---|---|---|---|
+| 2020–2026 | ✓ | ✓ | All 28 | Primary window |
+| 2015–2020 | ✓ | ✓ | ~10–14 (Shiller perennials + some cyclicals) | Best extended window — Wikipedia available, covers pre-COVID growth regime |
+| 2010–2015 | ✓ | ✗ | ~6–10 (perennials only, Trends-only) | Useful stress test — post-GFC recovery, housing/banking/recession narratives active |
+| Pre-2010 | ✓ | ✗ | Too few active | Not worth constructing |
+
+The recommended extended test is **2015–2026** as the primary robustness window (11 years, three distinct macro regimes), with an optional **2010–2015 Trends-only sub-test** limited to the Shiller perennial narratives. Note that the 2015–2020 sub-period will look like a different, thinner strategy — fewer active narratives means the signal is constructed from a smaller set. If the overlay still adds value under those conditions, that is strong evidence of generalizability rather than a limitation.
+
+**Survivorship bias:** The signal pipeline scores the current S&P 500 constituent list. The QuantConnect backtest engine uses historical constituent data automatically, so backtest results are survivorship-bias-free at the portfolio level. The signal inputs (10-K scores for delisted companies) are absent — a minor conservative bias in the pre-2020 period.
 
 ---
 
