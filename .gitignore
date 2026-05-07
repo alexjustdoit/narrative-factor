@@ -3,8 +3,6 @@ __pycache__/
 *.pyc
 .DS_Store
 venv/
-data/trends/
-data/signals/
 data/universe/cik_map.json
 data/filings.db
 data/scores.db
