@@ -186,3 +186,51 @@ def build_composite(date_str: str,
     )
 
     return composite[["ticker", "sector", "raw_score", "active_narrative_count"]]
+
+
+# ---------------------------------------------------------------------------
+# Weekly runner entry point
+# ---------------------------------------------------------------------------
+
+def build_and_save() -> pd.DataFrame:
+    """
+    Builds composite scores for today and appends to the signal parquet.
+    Called by run_weekly.py after each weekly refresh.
+    Returns the DataFrame built for today (empty if no active narratives).
+    """
+    from scorer import get_scores_db
+    import filings as filing_store
+    from universe import fetch_universe
+
+    PARQUET = "data/signals/composite_scores.parquet"
+    today   = pd.Timestamp.today().normalize().strftime("%Y-%m-%d")
+
+    universe_df = fetch_universe()
+    tickers     = universe_df["ticker"].tolist()
+    sector_map  = dict(zip(universe_df["ticker"], universe_df["sector"]))
+
+    scores_conn  = get_scores_db()
+    filings_conn = filing_store.get_db()
+
+    try:
+        df = build_composite(today, tickers, sector_map, scores_conn, filings_conn)
+    finally:
+        scores_conn.close()
+        filings_conn.close()
+
+    if df.empty:
+        return df
+
+    df = df.rename(columns={"raw_score": "composite_score"})
+    df.insert(0, "date", pd.Timestamp(today))
+
+    os.makedirs("data/signals", exist_ok=True)
+    if os.path.exists(PARQUET):
+        existing = pd.read_parquet(PARQUET)
+        existing = existing[existing["date"].dt.date != pd.Timestamp(today).date()]
+        result   = pd.concat([existing, df], ignore_index=True).sort_values(["date", "ticker"])
+    else:
+        result = df
+
+    result.to_parquet(PARQUET, index=False)
+    return df

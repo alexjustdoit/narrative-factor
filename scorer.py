@@ -13,7 +13,7 @@ Supports two backends, selected via SCORER_BACKEND env var:
 Required env vars:
   ANTHROPIC_API_KEY           — for anthropic backend
   LOCAL_LLM_BASE_URL          — for local backend (e.g. http://192.168.1.x:11434/v1)
-  LOCAL_LLM_MODEL             — model name for local backend (e.g. qwen2.5:72b)
+  LOCAL_LLM_MODEL             — model name for local backend (e.g. qwen3.6:35b)
 """
 
 import json
@@ -24,7 +24,7 @@ from datetime import datetime, UTC
 from dotenv import load_dotenv
 
 import filings as filing_store
-from narratives import NARRATIVE_MAP
+from narratives import NARRATIVE_MAP, NARRATIVES
 
 load_dotenv()
 
@@ -38,7 +38,15 @@ LOCAL_MODEL = os.getenv("LOCAL_LLM_MODEL", "qwen2.5:72b")
 # Prompts
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """You are a systematic equity analyst scoring company exposures to macro narratives.
+# All 14 narrative definitions are embedded in the system prompt so the entire
+# block can be prompt-cached. This pushes the system content above the 2048-token
+# minimum required for caching on Haiku (and 1024 for Sonnet).
+_NARRATIVE_BLOCK = "\n\n".join(
+    f"**{n['label']} (`{n['id']}`)**\n{n['description']}"
+    for n in NARRATIVES
+)
+
+SYSTEM_PROMPT = f"""You are a systematic equity analyst scoring company exposures to macro narratives.
 
 Your task is to assess how a specific macro narrative causally impacts a company's
 business — through revenue, costs, demand, regulation, or competitive position.
@@ -51,25 +59,14 @@ Key principles:
 - Score relative to the cross-section: if NVIDIA is +3 on GPU Demand for AI,
   score other companies relative to that anchor.
 - Use only the filing context provided. Do not use knowledge of events that
-  occurred after the as-of date."""
+  occurred after the as-of date.
 
-SCORE_PROMPT = """## Narrative
-**{label}**
+## Narratives
 
-{description}
+{_NARRATIVE_BLOCK}
 
-## Company
-**Ticker:** {ticker}
-**Filing context as of:** {as_of_date}
+## Scoring Scale
 
-### Business Description (Item 1)
-{item1_text}
-
-### Management Discussion & Analysis (Item 7)
-{item7_text}
-
-## Scoring Task
-Score this company's exposure to the narrative above on this scale:
   +3 = Core business is a primary beneficiary — directly and substantially benefits
   +2 = Significant revenue or demand tailwind
   +1 = Some positive exposure but not a primary driver
@@ -79,6 +76,7 @@ Score this company's exposure to the narrative above on this scale:
   -3 = Core business faces direct and substantial threat
 
 ## Instructions
+
 Think through this step by step:
 1. What types of companies benefit or suffer from this narrative, and why?
 2. What specific business mechanisms apply here (revenue streams, cost structure, customer base)?
@@ -86,10 +84,21 @@ Think through this step by step:
 4. What is the net directional score, weighted by magnitude?
 
 Respond with valid JSON only — no markdown, no explanation outside the JSON:
-{{
-  "reasoning": "<2-3 sentences on the specific causal mechanism for this company>",
-  "score": <integer from -3 to +3>
-}}"""
+{{"reasoning": "<2-3 sentences on the specific causal mechanism for this company>",
+ "score": <integer from -3 to +3>}}"""
+
+# User message contains only the variable parts: which narrative + filing context.
+SCORE_PROMPT = """Score this company against the **{label}** narrative.
+
+## Company
+**Ticker:** {ticker}
+**Filing context as of:** {as_of_date}
+
+### Business Description (Item 1)
+{item1_text}
+
+### Management Discussion & Analysis (Item 7)
+{item7_text}"""
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +107,8 @@ Respond with valid JSON only — no markdown, no explanation outside the JSON:
 
 def get_scores_db() -> sqlite3.Connection:
     os.makedirs("data", exist_ok=True)
-    conn = sqlite3.connect(SCORES_DB)
+    conn = sqlite3.connect(SCORES_DB, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")   # allows concurrent writers from parallel backfill
 
     # Cache key is (ticker, narrative_id, accession_number) — the specific filing,
     # not the date. One LLM call per filing covers all weeks that filing is current.
@@ -150,7 +160,6 @@ def _build_prompt(ticker: str, narrative_id: str, as_of_date: str,
     narrative = NARRATIVE_MAP[narrative_id]
     return SCORE_PROMPT.format(
         label=narrative["label"],
-        description=narrative["description"],
         ticker=ticker,
         as_of_date=as_of_date,
         item1_text=item1 or "(not available)",
@@ -164,15 +173,15 @@ def _call_anthropic(prompt: str) -> dict:
     message = client.messages.create(
         model=MODEL,
         max_tokens=300,
-        system=SYSTEM_PROMPT,
+        system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": prompt}],
     )
     return _parse_response(message.content[0].text)
 
 
-def _call_local(prompt: str) -> dict:
+def _call_local(prompt: str, endpoint_url: str | None = None) -> dict:
     from openai import OpenAI
-    client = OpenAI(base_url=LOCAL_URL, api_key="local")
+    client = OpenAI(base_url=endpoint_url or LOCAL_URL, api_key="local")
     response = client.chat.completions.create(
         model=LOCAL_MODEL,
         max_tokens=300,
@@ -185,10 +194,10 @@ def _call_local(prompt: str) -> dict:
 
 
 def _call_llm(ticker: str, narrative_id: str, as_of_date: str,
-              item1: str, item7: str) -> dict:
+              item1: str, item7: str, endpoint_url: str | None = None) -> dict:
     prompt = _build_prompt(ticker, narrative_id, as_of_date, item1, item7)
     if BACKEND == "local":
-        return _call_local(prompt)
+        return _call_local(prompt, endpoint_url=endpoint_url)
     return _call_anthropic(prompt)
 
 
@@ -255,6 +264,51 @@ def score_one(ticker: str, narrative_id: str, as_of_date: str,
             scores_conn.close()
         if own_filings:
             filings_conn.close()
+
+
+def score_direct(ticker: str, narrative_id: str,
+                 accession_number: str, filed_date: str,
+                 item1_text: str | None, item7_text: str | None,
+                 endpoint_url: str | None = None) -> dict | None:
+    """
+    Scores a (ticker, narrative, filing) tuple directly without a filing DB lookup.
+    Thread-safe: opens and closes its own scores DB connection.
+    Used by the parallel backfill to avoid sharing connections across threads.
+
+    endpoint_url overrides LOCAL_LLM_BASE_URL — pass a different URL per worker
+    to distribute load across multiple Ollama nodes.
+    """
+    scores_conn = get_scores_db()
+    try:
+        cached = scores_conn.execute("""
+            SELECT score, reasoning FROM scores
+            WHERE ticker = ? AND narrative_id = ? AND accession_number = ?
+        """, (ticker, narrative_id, accession_number)).fetchone()
+
+        if cached:
+            return {"score": cached[0], "reasoning": cached[1], "cached": True}
+
+        result = _call_llm(
+            ticker, narrative_id, filed_date,
+            item1_text or "", item7_text or "",
+            endpoint_url=endpoint_url,
+        )
+
+        active_model = LOCAL_MODEL if BACKEND == "local" else MODEL
+        scores_conn.execute("""
+            INSERT OR IGNORE INTO scores
+                (ticker, narrative_id, accession_number, filed_date,
+                 score, reasoning, model, scored_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            ticker, narrative_id, accession_number, filed_date,
+            result["score"], result["reasoning"],
+            active_model, datetime.now(UTC).isoformat(),
+        ))
+        scores_conn.commit()
+        return result
+    finally:
+        scores_conn.close()
 
 
 def score_batch(tickers: list[str], narrative_ids: list[str], as_of_date: str,

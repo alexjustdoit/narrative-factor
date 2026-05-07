@@ -93,7 +93,7 @@ def run(from_date: str | None = None, force: bool = False) -> None:
                 active = int(df["active_narrative_count"].iloc[0]) if "active_narrative_count" in df.columns else "?"
                 print(f"[{i}/{len(dates)}] {date_str} — {len(df)} tickers scored, {active} active narratives")
             else:
-                print(f"[{i}/{len(dates)}] {date_str} — no active narratives, skipped")
+                print(f"[{i}/{len(dates)}] {date_str} — skipped (no active narratives or no cached scores)")
         except Exception:
             failed.append(date_str)
             print(f"[{i}/{len(dates)}] {date_str} — ERROR")
@@ -109,6 +109,10 @@ def run(from_date: str | None = None, force: bool = False) -> None:
         return
 
     new_df = pd.concat(new_rows, ignore_index=True)
+
+    # composite.py outputs raw_score; rename to composite_score for downstream consumers
+    if "raw_score" in new_df.columns and "composite_score" not in new_df.columns:
+        new_df = new_df.rename(columns={"raw_score": "composite_score"})
 
     if existing is not None and not force:
         result = pd.concat([existing, new_df], ignore_index=True)

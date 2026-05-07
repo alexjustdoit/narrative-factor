@@ -57,11 +57,11 @@ narrative-factor/
 ├── qc/
 │   ├── algorithm.py     # QuantConnect backtest algorithm
 │   └── upload_signals.py
-└── data/                # Generated — not committed
+└── data/                # Generated — not committed (~20 GB total)
     ├── trends/          # Google Trends CSVs per narrative
     ├── signals/         # Activation signals + composite_scores.parquet
     ├── universe/        # S&P 500 tickers + GICS classification
-    ├── filings.db       # SQLite: 10-K sections per company
+    ├── filings.db       # SQLite: 10-K sections per company (~2 GB)
     └── scores.db        # SQLite: LLM exposure scores per (ticker, narrative, filing)
 ```
 
@@ -80,14 +80,15 @@ cp .env.example .env
 Edit `.env`:
 
 ```env
-# For Anthropic API backend (validation / weekly maintenance)
-ANTHROPIC_API_KEY=your-key-here
 EDGAR_EMAIL=your-email@example.com
 
-# For local LLM backend (initial backfill — see below)
+# Backend: "anthropic" or "local" — works for all steps including weekly maintenance
 SCORER_BACKEND=local
 LOCAL_LLM_BASE_URL=http://localhost:11434/v1
-LOCAL_LLM_MODEL=qwen2.5:72b
+LOCAL_LLM_MODEL=qwen3.6:35b
+
+# Only needed when SCORER_BACKEND=anthropic
+ANTHROPIC_API_KEY=your-key-here
 ```
 
 ---
@@ -112,11 +113,12 @@ Steps 1 and 2 can run in parallel in separate terminals.
 
 **Step 3 — Historical backfill (score all companies × all narratives)**
 
-Run on a local GPU machine to avoid API rate limits and cost (~45 hours on 2× RTX 3090):
+Run on a local GPU machine to avoid API rate limits and cost.
+
 ```bash
 # On the GPU machine — install Ollama and pull the model first
 curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:72b
+ollama pull qwen3.6:35b
 
 # Copy data files from the fetch machine
 scp user@fetch-machine:narrative-factor/data/filings.db data/
@@ -125,7 +127,40 @@ scp -r user@fetch-machine:narrative-factor/data/signals data/
 
 # Run the backfill
 venv/bin/python run_weekly.py --backfill
+
+# Skip the Google Trends refresh when re-running in the same session
+# (trends data won't have changed, saves ~4 min of API calls)
+venv/bin/python run_weekly.py --backfill --skip-trends
 ```
+
+The backfill parallelizes automatically:
+
+- **NVIDIA discrete GPUs** — detected via `nvidia-smi`, one worker per GPU; no configuration needed
+- **APU / Strix nodes** — set `BACKFILL_WORKERS=N` in `.env` (APUs aren't visible to nvidia-smi)
+- **Multi-node cluster** — set `LOCAL_LLM_BASE_URL` to a comma-separated list of Ollama endpoints; workers are assigned round-robin across endpoints
+
+Example `.env` for a 14-worker setup (2× RTX 3090 + 2 Strix nodes with 6 Ollama instances each):
+
+```env
+SCORER_BACKEND=local
+LOCAL_LLM_MODEL=qwen3.6:35b
+BACKFILL_WORKERS=14
+LOCAL_LLM_BASE_URL=http://localhost:11434/v1,http://192.168.1.3:11434/v1
+```
+
+Also set `OLLAMA_NUM_PARALLEL=6` in the Ollama service config on each Strix node so it accepts concurrent requests.
+
+Estimated backfill times with Qwen3.6 35B (Q4, ~18 GB VRAM — fits on a single RTX 3090):
+
+| Hardware | Workers | Est. time |
+|---|---|---|
+| 2× RTX 3090 only | 2 | ~9.7 hrs |
+| 2× RTX 3090 + 2 Strix nodes (6 Ollama instances each) | 14 | ~3 hrs |
+| Previous baseline (Qwen2.5 72B, both 3090s PCIe-bridged) | 1 effective | ~45 hrs |
+
+Qwen3.6 35B fits on a single RTX 3090 (vs. Qwen2.5 72B needing both GPUs shared over PCIe), so each 3090 runs its own independent instance — that's the main reason for the 4.5× speedup on the same hardware.
+
+If the backfill is interrupted it resumes from where it left off — already-cached scores are skipped at startup.
 
 **Step 4 — Export signals for backtesting**
 ```bash
@@ -135,7 +170,11 @@ venv/bin/python export_signals.py
 
 ### Weekly maintenance
 
-After the initial backfill, weekly cost is ~$0.50 (only new filings are re-scored):
+After the initial backfill, only newly filed 10-Ks are scored — ~50 filings/week across the S&P 500. Cost depends on backend:
+
+- **Local** (`SCORER_BACKEND=local`): negligible electricity, same as backfill
+- **Anthropic** (`SCORER_BACKEND=anthropic`): ~$0.50/week at claude-sonnet-4-6 pricing
+
 ```bash
 venv/bin/python run_weekly.py
 ```
@@ -152,14 +191,16 @@ venv/bin/python run_weekly.py
 
 ## LLM backends
 
-Scorer supports two backends, set via `SCORER_BACKEND` in `.env`:
+Both backends work for all pipeline steps — set `SCORER_BACKEND` in `.env` to switch:
 
-| Backend | When to use | Cost |
+| Backend | Cost: initial backfill | Cost: weekly maintenance |
 |---|---|---|
-| `anthropic` | Validation, weekly maintenance | ~$0.50/week steady-state |
-| `local` | Initial backfill (500 companies × 14 narratives × 6 years) | ~$1.50 electricity / 45 hrs |
+| `anthropic` | ~$87 one-time (500 co × 14 narratives × ~6 yrs) | ~$0.50/week (only new filings scored) |
+| `local` | ~$0.50 electricity / ~3 hrs on full cluster | Negligible — same cache logic applies |
 
-Scores are cached by `(ticker, narrative_id, accession_number)` — one LLM call per filing covers all weeks that filing is current (~52 weeks per 10-K). The cache means the initial backfill is a one-time cost; subsequent runs only score new filings.
+The typical setup is `local` for the initial backfill (saves ~$87), then either backend for weekly maintenance. If you have a GPU machine running anyway, keeping `local` for weekly runs is essentially free.
+
+Scores are cached by `(ticker, narrative_id, accession_number)` — one LLM call per filing covers all weeks that filing is current (~52 weeks per 10-K). This reduces unique calls by ~37x vs. caching by date. The initial backfill is a one-time cost; subsequent weekly runs only score new filings (~50 new filings/week across the S&P 500).
 
 ---
 

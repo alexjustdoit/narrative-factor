@@ -25,7 +25,7 @@ GROWTH_THRESHOLD = 1.0  # 100% growth = doubled
 LOOKBACK_3M = 13        # ~3 months in weekly data
 LOOKBACK_3Y = 156       # ~3 years in weekly data
 ROLLING_HIGH_DAYS = 26  # 180 days ≈ 26 weeks
-PROXIMITY_PCT = 0.95    # must be within 95% of rolling high
+PROXIMITY_PCT = 0.80    # must be within 80% of rolling high
 
 
 def compute_activation(narrative_id: str) -> pd.DataFrame:
@@ -50,7 +50,18 @@ def compute_activation(narrative_id: str) -> pd.DataFrame:
     growth_3m = (scores / score_3m_ago.replace(0, np.nan)) - 1
     growth_3y = (scores / score_3y_ago.replace(0, np.nan)) - 1
 
-    meets_growth = (growth_3m >= GROWTH_THRESHOLD) | (growth_3y >= GROWTH_THRESHOLD)
+    # A narrative that rises from below the floor to above it counts as meeting
+    # the growth requirement — covers fast spikes from near-zero baselines
+    # (e.g. pandemic in March 2020, tariffs in early 2025) where the ratio
+    # is undefined because the prior score was effectively zero.
+    # fillna(0): treat missing prior data (before series start) as zero baseline.
+    emerged_3m = (score_3m_ago.fillna(0) < MIN_SCORE) & meets_floor
+    emerged_3y = (score_3y_ago.fillna(0) < MIN_SCORE) & meets_floor
+
+    meets_growth = (
+        (growth_3m >= GROWTH_THRESHOLD) | emerged_3m |
+        (growth_3y >= GROWTH_THRESHOLD) | emerged_3y
+    )
 
     stage1 = meets_floor & meets_growth
 

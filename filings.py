@@ -1,9 +1,18 @@
 """
-Fetches, parses, and caches 10-K filing sections for the S&P 500 universe.
+Fetches, parses, and caches 10-K and 10-Q filing sections for the S&P 500 universe.
 
-For each company we store:
-  - Item 1  (Business Description) — what the company does
-  - Item 7  (MD&A)                 — management's view of trends and risks
+For each filing we store two sections mapped to common column names:
+
+  10-K  →  item1_text: Item 1  (Business Description)
+            item7_text: Item 7  (MD&A)
+
+  10-Q  →  item1_text: Item 1A (Risk Factors — updated risks only; may be empty)
+            item7_text: Item 2  (MD&A — quarterly management discussion)
+
+Using the same columns for both form types means get_context() and the scorer
+work unchanged. Since get_context() returns the most recent filing before any
+given date, a Q3 10-Q (filed November) will automatically be preferred over
+the prior year's 10-K for scoring dates in November–January.
 
 Text is truncated to MAX_CHARS per section to keep LLM prompt sizes manageable.
 Stored in SQLite at data/filings.db keyed by (ticker, accession_number).
@@ -102,14 +111,36 @@ def extract_item7(text: str) -> str:
     )
 
 
+def extract_item1a(text: str) -> str:
+    """10-Q Item 1A — Risk Factors (updated risks only; often short or empty)."""
+    return _extract_section(
+        text,
+        start_pattern=r"item\s+1a[\.\s]+risk",
+        end_pattern=r"item\s+1b[\.\s]|item\s+2[\.\s]",
+    )
+
+
+def extract_item2_10q(text: str) -> str:
+    """10-Q Item 2 — Management's Discussion and Analysis."""
+    return _extract_section(
+        text,
+        start_pattern=r"item\s+2[\.\s]+management",
+        end_pattern=r"item\s+3[\.\s]|item\s+4[\.\s]",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fetch and store
 # ---------------------------------------------------------------------------
 
-def fetch_and_store(ticker: str, conn: sqlite3.Connection, n_filings: int = 3):
+def fetch_and_store(ticker: str, conn: sqlite3.Connection,
+                    n_filings: int = 3, form_type: str = "10-K"):
     """
-    Fetches the most recent n_filings 10-K filings for a ticker and stores
-    extracted sections in the database. Skips filings already in DB.
+    Fetches the most recent n_filings filings of form_type for a ticker and
+    stores extracted sections in the database. Skips filings already in DB.
+
+    For 10-K: extracts Item 1 → item1_text, Item 7 → item7_text.
+    For 10-Q: extracts Item 1A → item1_text, Item 2 → item7_text.
     """
     cik = edgar.ticker_to_cik(ticker)
     if not cik:
@@ -117,7 +148,7 @@ def fetch_and_store(ticker: str, conn: sqlite3.Connection, n_filings: int = 3):
         return
 
     try:
-        filings = edgar.get_filing_list(cik, form_type="10-K")
+        filings = edgar.get_filing_list(cik, form_type=form_type)
     except Exception as e:
         print(f"  {ticker}: failed to get filing list — {e}")
         return
@@ -127,7 +158,6 @@ def fetch_and_store(ticker: str, conn: sqlite3.Connection, n_filings: int = 3):
     for _, row in filings.iterrows():
         acc = row["accession_number"]
 
-        # Skip if already in DB
         exists = conn.execute(
             "SELECT 1 FROM filings WHERE accession_number = ?", (acc,)
         ).fetchone()
@@ -137,8 +167,13 @@ def fetch_and_store(ticker: str, conn: sqlite3.Connection, n_filings: int = 3):
         try:
             html = edgar.get_filing_html(cik, acc, row["primary_document"])
             text = _html_to_text(html)
-            item1 = extract_item1(text)
-            item7 = extract_item7(text)
+
+            if form_type == "10-Q":
+                item1 = extract_item1a(text)
+                item7 = extract_item2_10q(text)
+            else:
+                item1 = extract_item1(text)
+                item7 = extract_item7(text)
 
             conn.execute("""
                 INSERT OR IGNORE INTO filings
@@ -198,12 +233,13 @@ if __name__ == "__main__":
     tickers = get_tickers()
     conn = get_db()
 
-    print(f"Fetching 10-K filings for {len(tickers)} tickers...")
-    print("This will take ~30-45 minutes. Already-cached filings are skipped.\n")
+    print(f"Fetching 10-K and 10-Q filings for {len(tickers)} tickers...")
+    print("This will take ~60-90 minutes. Already-cached filings are skipped.\n")
 
     for i, ticker in enumerate(tickers):
         print(f"[{i+1}/{len(tickers)}] {ticker}")
-        fetch_and_store(ticker, conn, n_filings=3)
+        fetch_and_store(ticker, conn, n_filings=3, form_type="10-K")
+        fetch_and_store(ticker, conn, n_filings=4, form_type="10-Q")
 
     total = conn.execute("SELECT COUNT(*) FROM filings").fetchone()[0]
     print(f"\nDone. {total} filings stored in {DB_PATH}")

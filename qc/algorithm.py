@@ -5,6 +5,9 @@ Long-only implementation of the narrative factor strategy.
 Rebalances weekly, holding the top-decile narrative composite score
 within each GICS sector (industry-neutral).
 
+When no narratives are active the strategy holds cash — matching the paper's
+design where the factor goes flat during inactive windows.
+
 Setup:
   1. Upload data/signals/composite_scores.parquet to QC Object Store
      via the QC Research terminal:
@@ -19,11 +22,10 @@ import io
 import pandas as pd
 
 
-SIGNAL_KEY         = "narrative/composite_scores.parquet"
-TOP_DECILE         = 0.10      # fraction of each sector to go long
-MIN_SECTOR_STOCKS  = 5         # skip sector if fewer stocks have scores
-REBALANCE_DAY      = 0         # Monday (QC weekday: 0=Mon … 4=Fri)
-MAX_POSITION_SIZE  = 0.05      # single-stock weight cap
+SIGNAL_KEY        = "narrative/composite_scores.parquet"
+TOP_DECILE        = 0.10    # fraction of each sector to go long
+MIN_SECTOR_STOCKS = 5       # skip sector if fewer stocks have scores
+MAX_POSITION_SIZE = 0.05    # single-stock weight cap
 
 
 class NarrativeFactorAlgorithm(QCAlgorithm):
@@ -37,14 +39,15 @@ class NarrativeFactorAlgorithm(QCAlgorithm):
         self.set_brokerage_model(BrokerageName.INTERACTIVE_BROKERS_BROKERAGE,
                                  AccountType.CASH)
 
-        # Equities — added dynamically from signal universe
+        # SPY is needed as the schedule anchor
+        self.add_equity("SPY", Resolution.DAILY)
+
         self._signals: pd.DataFrame = pd.DataFrame()
         self._symbol_map: dict[str, Symbol] = {}
 
         self._load_signals()
         self._add_universe_equities()
 
-        # Weekly rebalance on Monday open
         self.schedule.on(
             self.date_rules.every(DayOfWeek.MONDAY),
             self.time_rules.after_market_open("SPY", 30),
@@ -70,17 +73,22 @@ class NarrativeFactorAlgorithm(QCAlgorithm):
                 self._symbol_map[ticker] = symbol
             except Exception:
                 pass  # ticker may not be in QC data (delisted, name change, etc.)
+        self.log(f"Added {len(self._symbol_map)} of {self._signals['ticker'].nunique()} "
+                 f"signal tickers to QC universe")
 
     # ------------------------------------------------------------------
     # Rebalancing
     # ------------------------------------------------------------------
 
     def _rebalance(self) -> None:
-        today = self.time.date()
+        today = self.Time.date()
         targets = self._get_targets(today)
 
         if not targets:
-            self.log(f"{today}: no active narrative signal — holding positions")
+            # No active narratives — go flat (matches paper's design)
+            if self.portfolio.invested:
+                self.liquidate()
+                self.log(f"{today}: no active narrative — liquidated to cash")
             return
 
         # Liquidate positions no longer in target set
@@ -88,9 +96,10 @@ class NarrativeFactorAlgorithm(QCAlgorithm):
             if holding.invested and holding.symbol not in targets:
                 self.liquidate(holding.symbol)
 
-        # Set target weights
+        # Set target weights for tradeable securities
         for symbol, weight in targets.items():
-            self.set_holdings(symbol, weight)
+            if self.securities[symbol].is_tradable:
+                self.set_holdings(symbol, weight)
 
         self.log(f"{today}: {len(targets)} positions, "
                  f"avg weight {sum(targets.values())/len(targets):.2%}")
@@ -100,19 +109,20 @@ class NarrativeFactorAlgorithm(QCAlgorithm):
         Select top-decile tickers within each sector on the most recent
         signal date <= today. Returns {Symbol: weight} or empty dict.
         """
-        df = self._signals
-        past = df[df["date"].dt.date <= today]
+        past = self._signals[self._signals["date"].dt.date <= today]
         if past.empty:
             return {}
 
-        # Use the most recent signal date
         latest_date = past["date"].max()
         snap = past[past["date"] == latest_date].copy()
 
+        # Empty composite_score rows indicate inactive period in the signal file
+        if snap["composite_score"].isna().all():
+            return {}
+
         selected_tickers = []
         for sector, group in snap.groupby("sector"):
-            # Only include tickers we successfully added to QC
-            group = group[group["ticker"].isin(self._symbol_map)]
+            group = group[group["ticker"].isin(self._symbol_map)].dropna(subset=["composite_score"])
             if len(group) < MIN_SECTOR_STOCKS:
                 continue
             n_long = max(1, round(len(group) * TOP_DECILE))
@@ -122,7 +132,6 @@ class NarrativeFactorAlgorithm(QCAlgorithm):
         if not selected_tickers:
             return {}
 
-        # Equal weight, capped at MAX_POSITION_SIZE
         raw_weight = 1.0 / len(selected_tickers)
         weight = min(raw_weight, MAX_POSITION_SIZE)
 
