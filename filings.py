@@ -234,13 +234,13 @@ if __name__ == "__main__":
     conn = get_db()
 
     print(f"Fetching 10-K filings for {len(tickers)} tickers...")
-    print("10-K: 7 per ticker (~FY2018–FY2024, covers 2020–2026 backtest)")
+    print("10-K: 11 per ticker (~FY2014–FY2024, covers 2015–2026 extended backtest window)")
     print("Phase 2 (10-Qs) is commented out — run after validating 10-K backtest.")
     print("This will take ~90 min. Already-cached filings are skipped.\n")
 
     for i, ticker in enumerate(tickers):
         print(f"[{i+1}/{len(tickers)}] {ticker}")
-        fetch_and_store(ticker, conn, n_filings=7, form_type="10-K")   # covers FY2018–FY2024 (2020–2026 backtest)
+        fetch_and_store(ticker, conn, n_filings=11, form_type="10-K")  # covers FY2014–FY2024 (2015–2026 extended window)
         # Phase 2 — uncomment after validating 10-K-only backtest:
         # fetch_and_store(ticker, conn, n_filings=12, form_type="10-Q")
 
