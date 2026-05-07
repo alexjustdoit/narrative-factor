@@ -71,6 +71,13 @@ narrative-factor/
 
 ## Setup
 
+**1. Install Ollama and pull the model** (required for local LLM scoring):
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+ollama pull qwen3.6:35b
+```
+
+**2. Clone and install dependencies:**
 ```bash
 git clone https://github.com/alexjustdoit/narrative-factor
 cd narrative-factor
@@ -79,19 +86,28 @@ venv/bin/pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env`:
+**3. Edit `.env`:**
 
 ```env
 EDGAR_EMAIL=your-email@example.com
 
-# Backend: "anthropic" or "local" — works for all steps including weekly maintenance
 SCORER_BACKEND=local
-LOCAL_LLM_BASE_URL=http://localhost:11434/v1
 LOCAL_LLM_MODEL=qwen3.6:35b
 
-# Only needed when SCORER_BACKEND=anthropic
-ANTHROPIC_API_KEY=your-key-here
+# Single machine (both RTX 3090s detected automatically via nvidia-smi):
+LOCAL_LLM_BASE_URL=http://localhost:11434/v1
+
+# Multi-node cluster — comma-separate Ollama endpoints, workers assigned round-robin:
+# LOCAL_LLM_BASE_URL=http://localhost:11434/v1,http://192.168.1.3:11434/v1
+
+# APU / Strix nodes only (not visible to nvidia-smi — set worker count manually):
+# BACKFILL_WORKERS=14
+
+# Only needed when SCORER_BACKEND=anthropic:
+# ANTHROPIC_API_KEY=your-key-here
 ```
+
+If using Strix nodes, also set `OLLAMA_NUM_PARALLEL=6` in the Ollama service config on each node so it accepts concurrent requests.
 
 ---
 
@@ -99,78 +115,36 @@ ANTHROPIC_API_KEY=your-key-here
 
 ### First-time setup
 
-**Step 1 — Fetch narrative popularity data (~45–60 min)**
+Steps 1 and 2 below can run in parallel in separate terminals — do that to save ~45 min.
+
+**Step 1 — Fetch narrative popularity data (~45 min)**
 ```bash
-venv/bin/python trends.py       # Google Trends — rate-limited, takes ~45 min for 28 narratives
-venv/bin/python wiki.py         # Wikipedia pageviews — fast, no auth required (~5 min)
+venv/bin/python trends.py       # Google Trends, rate-limited — start this first
+venv/bin/python wiki.py         # Wikipedia pageviews (~5 min, run after trends starts)
 venv/bin/python reprocess.py    # resample to weekly if any chunks returned daily data
-venv/bin/python activation.py   # sanity check: prints which narratives were active at key dates
-
-# Optional: enable Wikipedia blending in .env, then rerun activation
-# USE_WIKIPEDIA=true
-# venv/bin/python activation.py --use-wikipedia
+venv/bin/python activation.py   # prints which narratives were active at key dates
 ```
 
-**Step 2 — Fetch company filings (~90 min)**
+**Step 2 — Fetch company filings (~90 min, run in a second terminal while Step 1 runs)**
 ```bash
-venv/bin/python filings.py   # fetches 7 10-Ks per ticker (~FY2018–FY2024)
+venv/bin/python filings.py      # fetches 7 10-Ks per ticker (~FY2018–FY2024)
 ```
 
-Steps 1 and 2 can run in parallel in separate terminals.
-
-> **Phase 1 / Phase 2:** The initial backfill scores 10-K filings only. After validating the backtest signal, uncomment the 10-Q line in `filings.py __main__` and run a second backfill pass for quarterly updates. The cache ensures already-scored 10-Ks are never re-scored.
-
-**Step 3 — Historical backfill (score all companies × all narratives)**
-
-Run on a local GPU machine to avoid API rate limits and cost.
-
+**Step 3 — Historical backfill (~9 hrs on full cluster)**
 ```bash
-# On the GPU machine — install Ollama and pull the model first
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen3.6:35b
-
-# Run the full pipeline — fetches, activation, then backfill in one shot
-venv/bin/python trends.py
-venv/bin/python wiki.py
-venv/bin/python reprocess.py
-venv/bin/python activation.py
-venv/bin/python filings.py
-venv/bin/python run_weekly.py --backfill --skip-trends --skip-wikipedia
-
-# If interrupted and re-running in the same session:
 venv/bin/python run_weekly.py --backfill --skip-trends --skip-wikipedia
 ```
 
-The backfill parallelizes automatically:
+The backfill auto-detects GPU count via `nvidia-smi` and parallelizes accordingly. If interrupted, it resumes from where it left off — already-cached scores are skipped at startup.
 
-- **NVIDIA discrete GPUs** — detected via `nvidia-smi`, one worker per GPU; no configuration needed
-- **APU / Strix nodes** — set `BACKFILL_WORKERS=N` in `.env` (APUs aren't visible to nvidia-smi)
-- **Multi-node cluster** — set `LOCAL_LLM_BASE_URL` to a comma-separated list of Ollama endpoints; workers are assigned round-robin across endpoints
-
-Example `.env` for a 14-worker setup (2× RTX 3090 + 2 Strix nodes with 6 Ollama instances each):
-
-```env
-SCORER_BACKEND=local
-LOCAL_LLM_MODEL=qwen3.6:35b
-BACKFILL_WORKERS=14
-LOCAL_LLM_BASE_URL=http://localhost:11434/v1,http://192.168.1.3:11434/v1
-```
-
-Also set `OLLAMA_NUM_PARALLEL=6` in the Ollama service config on each Strix node so it accepts concurrent requests.
-
-Estimated backfill times with Qwen3.6 35B (Q4, ~20 GB VRAM — fits on a single RTX 3090).
-Assumes ~73,500 calls (500 tickers × 7 10-Ks × ~21 ever-active narratives, Phase 1 / 10-K only):
+Estimated times with Qwen3.6 35B (~20 GB VRAM, fits on a single RTX 3090):
 
 | Hardware | Workers | Est. time |
 |---|---|---|
 | 2× RTX 3090 only | 2 | ~61 hrs |
 | 2× RTX 3090 + 2 Strix nodes (6 Ollama instances each) | 14 | ~9 hrs |
 
-Qwen3.6 35B fits on a single RTX 3090, so each GPU runs its own independent Ollama instance — two workers from the two 3090s alone, plus however many the Strix nodes add.
-
-Phase 2 (adding 10-Qs after backtest validation) adds ~126,000 more calls. Only new filings are scored — already-cached 10-Ks are skipped.
-
-If the backfill is interrupted it resumes from where it left off — already-cached scores are skipped at startup.
+> **Phase 1 / Phase 2:** The initial backfill scores 10-K filings only (~73,500 calls). After validating the backtest signal, uncomment the 10-Q line in `filings.py __main__`, re-run `filings.py`, then run another backfill pass. Already-cached 10-K scores are never re-scored.
 
 **Step 4 — Export signals for backtesting**
 ```bash
