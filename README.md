@@ -220,6 +220,78 @@ The weekly run now fetches Wikipedia pageviews for all 28 narratives (~5 min, ca
 
 ---
 
+## Mini validation run (RTX 4070 / 12GB VRAM)
+
+Before committing to the full 500-ticker backfill on a GPU cluster, run a mini validation to confirm that the local model is scoring correctly. This completes in 2-4 hours on a single RTX 4070 and gives you early signal quality data.
+
+**qwen3.6:35b requires ~18-20GB VRAM and won't fit in 12GB.** Use qwen3:14b instead (~8.5GB at Q4_K_M) — smaller but sufficient for the structured scoring task.
+
+```bash
+# Pull the smaller model
+ollama pull qwen3:14b
+```
+
+Set in `.env`:
+```env
+SCORER_BACKEND=local
+LOCAL_LLM_MODEL=qwen3:14b
+LOCAL_LLM_BASE_URL=http://localhost:11434/v1
+BACKFILL_WORKERS=1
+```
+
+Run the mini backfill (36 curated tickers, ~2-4 hrs):
+```bash
+venv/bin/python run_mini.py
+```
+
+Analyze results:
+```bash
+venv/bin/python validate_mini.py
+venv/bin/python validate_mini.py --samples 20   # more reasoning examples
+```
+
+`validate_mini.py` checks sanity cases with known expected directions (NVDA on AI, XOM on inflation, etc.) and outputs a go/no-go verdict:
+
+| Result | Criteria | Action |
+|---|---|---|
+| **GO** | ≥80% sanity checks correct + reasonable distribution | Proceed with full backfill |
+| **CAUTION** | 65–79% correct | Read reasoning samples carefully before committing |
+| **NO-GO** | <65% correct | Switch to larger model or Anthropic API |
+
+---
+
+## Transferring scores.db between machines
+
+After the backfill runs on a remote machine (friend's cluster, etc.), you need to copy `scores.db` back. The file is ~500MB–2GB depending on how many narratives were scored.
+
+**Recommended: Tailscale (stable hostnames, no port forwarding)**
+
+Tailscale creates a secure overlay network between machines. Once installed on both, each gets a stable hostname that works across networks and firewalls.
+
+```bash
+# Install on both machines (Mac: brew install tailscale; Linux: curl -fsSL https://tailscale.com/install.sh | sh)
+# Sign in on both: tailscale up
+# Check the hostname assigned to the remote machine: tailscale status
+
+# Then rsync scores.db back (resumable, shows progress):
+rsync -avz --progress remote-hostname:~/narrative-factor/data/scores.db data/scores.db
+```
+
+`rsync` is preferred over `scp` because it's resumable — if a 2GB transfer drops halfway, re-running picks up where it left off.
+
+**Simple fallback: Google Drive upload**
+
+If Tailscale isn't worth setting up for a one-time transfer, upload `scores.db` to Google Drive from the remote machine and download it on your end. The free tier (15GB) easily fits the file.
+
+**After receiving scores.db:**
+```bash
+# Generate the signal file locally (no GPU needed)
+venv/bin/python export_signals.py
+# Output: data/signals/composite_scores.parquet — upload this to QuantConnect
+```
+
+---
+
 ## QuantConnect backtest
 
 1. Upload `data/signals/composite_scores.parquet` to QC Object Store (see `qc/upload_signals.py`)
