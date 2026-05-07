@@ -237,6 +237,21 @@ qwen3.6:35b requires ~18-20GB VRAM and won't fit in 12GB. Use `qwen3:14b` (~8.5G
 2. Create a new QC Algorithm project and paste in `qc/algorithm.py`
 3. Set backtest dates to `2020-01-01` onward
 
+`qc/algorithm.py` is parametric — the top of the file has a CONFIG block with two variables that define the backtest variant:
+
+```python
+BASE_FACTOR  = "quality"    # "quality" | "value" | "momentum" | None
+OVERLAY_MODE = "selection"  # "selection" | "weighting" | "narrative_only"
+```
+
+| `OVERLAY_MODE` | Behavior |
+|---|---|
+| `narrative_only` | Baseline — top-decile by narrative score, equal weight |
+| `selection` | Base factor pre-filters sector to top 50%; narrative selects the top decile within that |
+| `weighting` | Narrative selects holdings; position sizes blend narrative + base factor scores |
+
+Run `narrative_only` first as the baseline, then layer in base factors. The full grid is 4 base factors × 3 overlay modes = 12 core variants, plus sweeps on `TOP_DECILE` and `NARRATIVE_BLEND`.
+
 ---
 
 ## LLM backends
